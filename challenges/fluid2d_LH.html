@@ -94,7 +94,7 @@
     var maxParticles = 10000;
 
     var numX = 10;
-    var numY = 1000;
+    var numY = 200; // 1000
     var numParticles = numX * numY;
 
     // boundary
@@ -118,7 +118,7 @@
     var kernelScale = 4.0 / (Math.PI * h2 * h2 * h2 * h2);
     // 2d poly6 (SPH based shallow water simulation
 
-    var gridSpacing = kernelRadius * 1.5;
+    var gridSpacing = kernelRadius; // * 1.5;
     var invGridSpacing = 1.0 / gridSpacing;
 
     var maxVel = 0.4 * particleRadius;
@@ -145,13 +145,24 @@
 
         pushBack(val) {
             if (this.size >= this.maxSize) {
-                this.maxSize *= 2;
-                var old = this.vals;
-                this.vals = new Int32Array(this.maxSize);
-                for (i = 0; i < old.length; i++)
-                    this.vals[i] = old[i];
+                this.resize();
             }
             this.vals[this.size++] = val;
+        }
+
+        resize() {
+            this.maxSize *= 2;
+            var old = this.vals;
+            this.vals = new Int32Array(this.maxSize);
+            for (i = 0; i < old.length; i++)
+                this.vals[i] = old[i];
+        }
+
+        AddPadding(arrPadding) {   //
+            if (this.size + arrPadding - 1 >= this.maxSize) {
+                this.resize();
+            }
+            this.size += arrPadding;
         }
     }
 
@@ -225,6 +236,7 @@
     // -----------------------------------------------------------------------------------
 
     var hashSize = 370111;
+    var arrPadding = 6;  // Set to 0 to disable efficient updates
 
     var hash = {
         size: hashSize,
@@ -234,12 +246,19 @@
         currentMark: 0,
 
         next: new Int32Array(maxParticles),
+        // Additional arrays
+        prev: new Int32Array(maxParticles),
 
         orig: {left: -100.0, bottom: -1.0}
     }
 
     var firstNeighbor = new Int32Array(maxParticles + 1);
     var neighbors = new Vector(10 * maxParticles);
+    // Additional arrays
+    var lastNeighbor = new Int32Array(maxParticles);
+    var prevGx = new Int32Array(maxParticles);
+    var prevGy = new Int32Array(maxParticles);
+    var prevH = new Int32Array(maxParticles);
 
     function findNeighbors() {
         // hash particles
@@ -255,6 +274,7 @@
             var gy = Math.floor((py - hash.orig.bottom) * invGridSpacing);
 
             var h = (Math.abs((gx * 92837111) ^ (gy * 689287499))) % hash.size;
+            prevH[i] = h; //
 
             if (hash.marks[h] != hash.currentMark) {
                 hash.marks[h] = hash.currentMark;
@@ -262,6 +282,9 @@
             }
 
             hash.next[i] = hash.first[h];
+            if (hash.first[h] >= 0) {
+                hash.prev[hash.first[h]] = i; //
+            }
             hash.first[h] = i;
         }
 
@@ -279,6 +302,9 @@
 
             var gx = Math.floor((px - hash.orig.left) * invGridSpacing);
             var gy = Math.floor((py - hash.orig.bottom) * invGridSpacing);
+
+            prevGx[i] = gx; //
+            prevGy[i] = gy; //
 
             var x, y;
 
@@ -302,8 +328,135 @@
                     }
                 }
             }
+
+            lastNeighbor[i] = neighbors.size; //
+
+            if (arrPadding > 0) {
+                neighbors.AddPadding(arrPadding); //
+            }
         }
         firstNeighbor[numParticles] = neighbors.size;
+    }
+
+    function updateNeighbors() {
+        var particlesToUpdate = new Int32Array(numParticles);
+        var numToUpdate = 0;
+
+        // hash particles
+        for (i = 0; i < numParticles; i++) {
+            var px = particles.pos[2 * i];
+            var py = particles.pos[2 * i + 1];
+
+            var gx = Math.floor((px - hash.orig.left) * invGridSpacing);
+            var gy = Math.floor((py - hash.orig.bottom) * invGridSpacing);
+
+            // If the cell has not changed, nothing needs to be updated
+            if (gx == prevGx[i] && gy == prevGy[i])
+                continue; //
+
+            particlesToUpdate[numToUpdate++] = i; //
+
+            var h = (Math.abs((gx * 92837111) ^ (gy * 689287499))) % hash.size;
+
+            if (hash.marks[h] != hash.currentMark) {
+                hash.marks[h] = hash.currentMark;
+                hash.first[h] = -1;
+            }
+
+            // Remove from previous hash cell
+            var next = hash.next[i], prev = hash.prev[i], prevHash = prevH[i];
+            if (next >= 0) {
+                hash.prev[next] = prev; //
+            }
+            if (hash.first[prevHash] == i) {
+                hash.first[prevHash] = next >= 0 ? next : -1; //
+            } else {
+                hash.next[prev] = next; //
+            }
+
+            prevH[i] = h; //
+
+            hash.next[i] = hash.first[h];
+            if (hash.first[h] >= 0) {
+                hash.prev[hash.first[h]] = i; //
+            }
+            hash.first[h] = i;
+        }
+
+        // collect neighbors
+
+        var neighborsArray = neighbors.vals; //
+        var h2 = gridSpacing * gridSpacing;
+
+        for (var k = 0; k < numToUpdate; k++) {
+            i = particlesToUpdate[k];
+
+            var px = particles.pos[2 * i];
+            var py = particles.pos[2 * i + 1];
+
+            var gx = Math.floor((px - hash.orig.left) * invGridSpacing);
+            var gy = Math.floor((py - hash.orig.bottom) * invGridSpacing);
+
+            var oldGx = prevGx[i];
+            var oldGy = prevGy[i];
+            prevGx[i] = gx; //
+            prevGy[i] = gy; //
+
+            var first = firstNeighbor[i];
+            var lastPossible = firstNeighbor[i + 1]; //
+            var newLast = first;
+
+            var x, y;
+
+            for (x = gx - 1; x <= gx + 1; x++) {
+                for (y = gy - 1; y <= gy + 1; y++) {
+
+                    var h = (Math.abs((x * 92837111) ^ (y * 689287499))) % hash.size;
+
+                    if (hash.marks[h] != hash.currentMark)
+                        continue;
+
+                    // Check if new cell and we have to add current particle as neighbor
+                    var newCell = x < oldGx - 1 || x > oldGx + 1 ||
+                        y < oldGy - 1 || y > oldGy + 1;
+
+                    var id = hash.first[h];
+                    while (id >= 0) {
+                        var dx = particles.pos[2 * id] - px;
+                        var dy = particles.pos[2 * id + 1] - py;
+
+                        if (dx * dx + dy * dy < h2) {
+                            if (newCell)
+                            {
+                                var lastOfId = lastNeighbor[id];
+                                var lasPossibleOfId = firstNeighbor[id + 1];
+                                if (lastOfId >= lasPossibleOfId)
+                                {
+                                    console.warn("Can't insert " + i + " to " + id); // TODO: Append as new list
+                                }
+                                else // We have padding space
+                                {
+                                    neighborsArray[lastOfId] = i; //
+                                    lastNeighbor[id]++; //
+                                }
+                            }
+
+                            if (newLast >= lastPossible)
+                            {
+                                console.warn("Too many new neighbors for particle " + i); // TODO: Append as new list
+                                break;
+                            }
+
+                            neighborsArray[newLast++] = id; //
+                        }
+
+                        id = hash.next[id];
+                    }
+                }
+            }
+
+            lastNeighbor[i] = newLast; //
+        }
     }
 
     // -----------------------------------------------------------------------------------
@@ -323,7 +476,7 @@
             var py = particles.pos[2 * i + 1];
 
             var first = firstNeighbor[i];
-            var num = firstNeighbor[i + 1] - first;
+            var num = lastNeighbor[i] - first; // firstNeighbor[i + 1] - first;
 
             var rho = 0.0;
             var sumGrad2 = 0.0;
@@ -404,7 +557,7 @@
 
     function applyViscosity(pnr, dt) {
         var first = firstNeighbor[pnr];
-        var num = firstNeighbor[pnr + 1] - first;
+        var num = lastNeighbor[pnr] - first; // firstNeighbor[i + 1] - first;
 
         if (num == 0)
             return;
@@ -431,7 +584,7 @@
     // -----------------------------------------------------------------------------------
 
     function simulate() {
-        findNeighbors();
+        // findNeighbors();
 
         var dt = timeStep / numSubSteps;
         var step;
@@ -447,6 +600,11 @@
                 particles.pos[2 * i] += particles.vel[2 * i] * dt;
                 particles.pos[2 * i + 1] += particles.vel[2 * i + 1] * dt;
             }
+
+            if (step == 0 || arrPadding == 0)
+                findNeighbors();
+            else
+                updateNeighbors();
 
             // solve
 
