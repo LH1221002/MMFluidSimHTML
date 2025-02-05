@@ -118,7 +118,7 @@
     var kernelScale = 4.0 / (Math.PI * h2 * h2 * h2 * h2);
     // 2d poly6 (SPH based shallow water simulation
 
-    var gridSpacing = kernelRadius; // * 1.5;
+    var gridSpacing = kernelRadius * 1.12;
     var invGridSpacing = 1.0 / gridSpacing;
 
     var maxVel = 0.4 * particleRadius;
@@ -609,6 +609,10 @@
             // solve
 
             solveBoundaries();
+
+            // if (arrPadding > 0)
+            //     updateNeighbors();
+
             solveFluid();
 
             // derive velocities
